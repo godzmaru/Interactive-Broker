@@ -1,0 +1,170 @@
+"""
+Created on Mon Apr 16 16:00:31 2018
+
+Using new ibapi. New Wrapper is not an abstract class so it is okay to use immediately. 
+Example can be explored from test/manual.py
+
+Prototype-3: Work in Progress
+@author: hendrawahyu
+"""
+
+
+from ibapi.client import EClient
+from ibapi.wrapper import EWrapper
+from ibapi.utils import iswrapper, current_fn_name
+from ibapi.contract import Contract
+from ibapi.ticktype import TickType
+from ibapi.order import Order
+from ibapi.order_state import OrderState
+from ibapi.common import TickerId, OrderId, TickAttrib
+
+import time
+import datetime
+import os
+import logging
+
+# =============================================================================
+# from ibapi.connection import Connection
+#
+# # establish connection with IBGateway (testing)
+# conn = Connection(host='localhost', port=4002)
+# conn.connect()
+# manual test establishing connection
+# msg = b'Hello World'
+# conn.sendMsg(msg)
+# time.sleep(2)
+# if conn.isConnected():
+#    print('SUCCESS! with message return:', conn.recvMsg())
+#    conn.disconnect()
+# =============================================================================
+LOG_FILE_MAX_SIZE = (1024*1024) * 10
+
+class Logger:
+    def __init__(self, logFilePath):
+        if not os.path.exists("log"):
+            os.makedirs("log")
+
+        # Setup rotating log files at logFilePath, each max of LOG_FILE_MAX_SIZE bytes
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        handler = logging.handlers.RotatingFileHandler(logFilePath, mode = 'w', maxBytes=LOG_FILE_MAX_SIZE, backupCount=5)
+        logger.addHandler(handler)
+
+    def debug(self, logStr):
+        finalLogStr = '(DEBUG) ' + logStr;
+        logging.debug(finalLogStr)
+
+    def warning(self, logStr):
+        finalLogStr = '(WARNING) ' + logStr;
+        logging.debug(finalLogStr)
+
+    def error(self, logStr):
+        finalLogStr = '(ERROR) ' + logStr;
+        logging.debug(finalLogStr)
+
+
+logger = Logger('log/client.out')
+
+# wrapping data
+class ClientApp(EWrapper, EClient):
+    def __init__(self):
+        EClient.__init__(self, self)
+        self.nextValidOrderId = None
+        self.permId2ord = {}
+    
+    @iswrapper
+    def error(self, *args):
+        super().error(*args)
+        print(current_fn_name(), vars())
+        
+    @iswrapper
+    def updateAccountTime(self,  timeStamp: str):
+        super().updateAccountTime(timeStamp)
+        logger.debug("updateAccountTime: %s" % timeStamp)
+        
+    @iswrapper
+    def connectAck(self):
+        logger.debug("connectAck")
+        
+    @iswrapper
+    def disconnect(self):
+        super().disconnect()
+        logger.debug("disconnect")
+    
+    def create_contract(self, symbol, secType, exch, curr):
+        contract = Contract()
+        contract.localSymbol = symbol
+        contract.secType = secType
+        contract.exchange = exch
+        contract.currency = curr
+        return contract
+    
+    @iswrapper
+    def openOrder(self, orderId:OrderId, contract:Contract, order:Order, 
+                  orderState:OrderState):
+        super().openOrder(orderId, contract, order, orderState)
+        print(current_fn_name(), vars())
+
+        order.contract = contract
+        self.permId2ord[order.permId] = order
+
+    @iswrapper
+    def openOrderEnd(self, *args):
+        super().openOrderEnd()
+        logging.debug("Received %d openOrders", len(self.permId2ord))
+
+    @iswrapper
+    def orderStatus(self, orderId:OrderId , status:str, filled:float,
+                    remaining:float, avgFillPrice:float, permId:int, 
+                    parentId:int, lastFillPrice:float, clientId:int, 
+                    whyHeld:str):
+        super().orderStatus(orderId, status, filled, remaining,
+            avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld)
+    
+    @iswrapper
+    def nextValidId(self, orderId:int):
+        super().nextValidId(orderId)
+        logging.debug("setting nextValidOrderId: %d", orderId)
+        self.nextValidOrderId = orderId
+    
+    # see ticktype.py
+    @iswrapper
+    def tickPrice(self, reqId: TickerId, tickType: TickType, price: float, attrib:TickAttrib):
+        super().tickPrice(reqId, tickType, price, attrib)
+        if (tickType == 1):
+            logger.debug("BID = %s" % str(price))
+        elif (tickType == 2):
+            logger.debug("ASK = %s" % str(price))
+        elif (tickType == 4):
+            logger.debug("LAST = %s" % str(price))
+    
+     # see ticktype.py
+    @iswrapper
+    def tickSize(self, reqId: TickerId, tickType: TickType, size: int):
+        super().tickSize(reqId, tickType, size)
+        if (tickType == 0):
+            logger.debug("BID_SIZE = %s" % str(size))
+        elif (tickType == 3):
+            logger.debug("ASK_SIZE = %s" % str(size))
+        elif (tickType == 5):
+            logger.debug("LAST_SIZE = %s" % str(size))
+        elif (tickType == 8):
+            logger.debug("VOLUME = %s" % str(size))
+
+    
+        
+if __name__ == '__main__':
+    logger.debug("Start Time: %s" % datetime.datetime.now())
+    cid = 10
+    accountId = 'DU594416'
+    tws = ClientApp()
+    tws.connect('127.0.0.1', 4002, clientId = cid)
+    if(tws.isConnected()):
+        logger.debug("ServerVersion:%s connectionTime:%s" % (tws.serverVersion(), tws.twsConnectionTime()))
+        tws.reqCurrentTime()
+        tws.reqManagedAccts()
+        tws.reqAccountSummary(reqId = 2, groupName = "All", tags = "NetLiquidation")
+        time.sleep(2)
+        tws.disconnect()
+    else:
+        logger.error("App failed to connect to IB gateway")
