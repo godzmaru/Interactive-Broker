@@ -19,7 +19,7 @@ numId = 0
 if __name__ == '__main__':
     cid = 10        # clientId: can be any number. It will show on IBGateway as folder/different user 
     orderId = 1     # orderId
-    accountId = 'DU15202'
+    accountId = 'DU594416'
     symbolId = '???'       # contract identifier id or asset id?
     port = 4002
     
@@ -37,7 +37,7 @@ if __name__ == '__main__':
     # =============================================================================
     # =============================================================================
     
-    
+    '''
     # =============================================================================     
     # UPDATE YOUR PORTFOLIO WITH 2 ALTERNATIVES FUNCTION
     # =============================================================================
@@ -189,7 +189,7 @@ if __name__ == '__main__':
             contract  = cont.create_contract('UVXY', 'STK', 'SMART', 'SMART', 'USD')
             order = cont.create_order(accountId, 'STP', position, 'SELL' )
             tws.placeOrder(order_id, contract, order)
-    
+    '''
     time.sleep(2)
     if(tws.isConnected()):
         tws.eDisconnect() 
