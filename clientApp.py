@@ -9,16 +9,18 @@ Created on Mon Apr 16 16:00:31 2018
 
 from ibapi import client
 from ibapi import wrapper
-from ibapi.utils import iswrapper, current_fn_name
-from ibapi.contract import Contract
-from ibapi.ticktype import TickType
+from ibapi.contract import Contract, ContractDetails
+from ibapi.ticktype import TickType, TickTypeEnum
 from ibapi.order import Order
 from ibapi.order_state import OrderState
-from ibapi.common import TickerId, OrderId, TickAttrib
+from ibapi.common import TickerId, OrderId, TickAttrib, BarData
+from ibapi.execution import Execution
+from ibapi.commission_report import CommissionReport
 
-import time
+#import time
 import datetime
 import logging
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -42,9 +44,11 @@ logger.addHandler(stream_handler)
 HOST = '127.0.0.1'
 PORT = 4002
 cid = 10
+Id = 9002
 acc_code = 'DU594416'
 user = 'faker251'
 passwd = 'akinad76'
+
 
 # wrapping data
 class ClientApp(wrapper.EWrapper, client.EClient):
@@ -62,8 +66,24 @@ class ClientApp(wrapper.EWrapper, client.EClient):
         # Orders
         setattr(self, 'order_Status', [])
         setattr(self, 'open_Order', [])
-        
-        # Misc
+        # Market Data
+        setattr(self, 'tick_Price', [])
+        setattr(self, 'tick_Size', [])   
+        setattr(self, 'tick_Generic', [])        
+        setattr(self, 'tick_String', []) 
+        setattr(self, 'tick_EFP', [])
+        # Market Scanner
+        setattr(self, 'scanner_Data',[])
+        # Market Depth
+        setattr(self, 'update_MktDepth', [])
+        setattr(self, 'update_MktDepthL2', [])
+        # Execution Detail
+        setattr(self, 'exec_Details', [])
+        # RealTimeBar / Fundamental / Historical
+        setattr(self, 'real_timeBar',[])
+        setattr(self, 'historical_Data', [])
+    
+        ### Variables ###
         self.nKeybInt = 0
         self.permId2ord = {}
         self.nextValidOrderId = None
@@ -71,84 +91,54 @@ class ClientApp(wrapper.EWrapper, client.EClient):
         self.account_value = 0
         self.unrealizedpnl = 0          # unrealized Profit and Loss
         
-        # Flags and other variables
+        ### Flags ###
         self.started = False
+        self.flag_iserror = False
         self.accountDownloadEnd_flag = False
         self.account_SummaryEnd_flag = False
         self.globalCancelOnly = False
         self.positionEnd_flag = False
         self.openOrderEnd_flag = True
         self.debug = False
-        
+        self.tickSnapshotEnd_flag = False
+        self.contract_Details_flag = False
+        self.ExecDetailsEnd_flag = False
+        self.ScannerDataEnd_flag = False
+        self.historicalDataEnd_flag = False
         
     ################### UTILS ###################
-    @iswrapper
     # callback signifying successfull connection to IBGateway
     def connectAck(self):
         if self.async:
             self.startApi()
             print('\nStarting the IB API')
     
-    @iswrapper
-    # invoke ClientApp.managedAccount([' list_of_all_account_ID '])
-    def managedAccounts(self, accountsList: str):
-        super().managedAccounts(accountsList)
-        print("\nAccount list: ", accountsList)
-        self.account = accountsList.split(",")[0]
-    
-    @iswrapper
+    # error handling
     def error(self, reqId: TickerId, errorCode: int, errorString: str):
-        print('\nError:')
-        print('\nId: {} - Code: {} - Message: {}'.format(reqId, errorCode, errorString))
-    
-    @iswrapper
-    def updateAccountTime(self, timeStamp: str):
-        self.update_AccountTime = timeStamp
-        print("\nUpdateAccountTime. Time:", timeStamp)
-    
+        ERRORS_TO_TRIGGER = [103, 162, 200, 201, 399, 420, 478, 502, 504, 509, 1100, 2105]
+        if errorCode in ERRORS_TO_TRIGGER:
+            self.flag_iserror = True
+            print('\nError:')
+            print('\nId: {} - Code: {} - Message: {}'.format(reqId, errorCode, errorString))
     
     ################### ORDER ID ###################
-    @iswrapper
     # receive next valid order ID
     def nextValidId(self, orderId: int):
-        print("\nNext Valid Order Id: %d", orderId)
+        super().nextValidId(orderId)
+        print("\nNext Valid Order Id: ", orderId)
         self.nextValidOrderId = orderId
         
         if self.started:
             return
         self.started = True
-        
-        if self.globalCancelOnly:
-            print("Executing GlobalCancel only")
-            self.reqGlobalCancel()
-        else:
-            print('\nExecuting Request:')
-            self.reqManagedAccts()      #
-            self.reqAccountSummary(9002, "All", "$LEDGER:USD")  # $LEDGER:USD, $LEDGER:ALL
-            self.reqAccountUpdates(True, acctCode = self.account)
-            self.reqPositions()         # request all position in account
-            ## CONTRACT / ORDER ##
-            #self.contractOperations_req()
-            #self.orderOperations_req()
-            
-            ## MARKET DATA ## 1.LIVE - 2.FROZEN - 3.DELAYED - 4.DELAYED FROZEN
-            #self.reqMarketDataType(1)
-            #self.marketDepthOperations_req() 
-            #self.realTimeBars_req()
-            #self.historicalDataRequests_req()
-            #self.marketRuleOperations()
-            #self.historicalTicksRequests_req()
-            #self.tickByTickOperations()
-            print("Executing requests ... finished")
-    
+          
     # automatically increment order Id by 1, this MUST be used in every transaction
     # like ordering, require market update etc
     def nextOrderId(self):
-        oid = self.nextValidOrderId
+        order_id = self.nextValidOrderId
         self.nextValidOrderId += 1
-        return oid
+        return order_id
         
-    
     ################### CANCELLATION / OPERATIONS / KEYBOARD ###################
     def keyboardInterrupt(self):
         self.nKeybInt += 1
@@ -163,50 +153,42 @@ class ClientApp(wrapper.EWrapper, client.EClient):
     def stop(self):
         print("Executing cancels")
         # account operation cancellation
-        self.reqAccountUpdates(False, self.account)
-        self.cancelAccountSummary(9002)
+        #self.reqAccountUpdates(False, self.account)
+        self.cancelAccountSummary(Id)
         self.cancelPositions()
         # cancel order
         if self.simplePlaceOid is not None:
             self.cancelOrder(self.simplePlaceOid)
             
         # cancel market data subscription
-        #self.cancelMktData(1101)               # require tickedId
+        self.cancelMktData(1101)               # require tickedId
+        self.cancelMktData(1102)               # require tickedId
         #self.cancelMktDepth(1101)              # require tickerId
         #self.cancelRealTimeBars(1101)          # require tickerId
         #self.cancelHistoricalData(1101)        # require tickerId
         #self.cancelScannerSubscription(1101)    # require tickerId
         
         print("Executing cancels ... finished")
+        self.disconnect()
     
-    
-    ################### UPDATE ###################    
-    @iswrapper
-    # Called after updateAccountValue() and updatePortfolio() is sent
-    def accountDownloadEnd(self, accountName: str):
-        super().accountDownloadEnd(accountName)
-        print("\nAccount download finished:", accountName)
-    
-    @iswrapper
+    ################### ACCOUNT SUMMARY ###################    
+    # similar function as reqAccountUpdates where it updates TWS Account. However,
+    # it is commonly used with MULTIPLE-account structures. It will also update
+    # every 3 minutes.
     def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency:str):
         account_Summary = self.account_Summary
         account_Summary.append({'reqId': reqId, 'account':account, 'tag':tag, 
-                                'value':value, 'currency': currency}) 
-        if(self.debug):
-            print("Acct Summary. ReqId:", reqId, "Acct:", account,
-              "Tag: ", tag, "Value:", value, "Currency:", currency)
+                                'value': value, 'currency':currency}) 
     
-    @iswrapper
+    # called once accountSummary ends
     def accountSummaryEnd(self, reqId: int):
-        if self.account_SummaryEnd_flag:
-            return
-        print('\nAccount Summary End')
-        print('\nReqId:', reqId)
-        self.accountSummaryEnd_reqId = reqId
+        print('\nAccount Summary End for ReqId: ', reqId)
         self.account_SummaryEnd_flag = True
     
-    @iswrapper
-    # automatically called up when reqAccountUpdates is activated
+    
+    ############## UPDATE: ALL THESE CALLED BY reqAccountUpdates ############# 
+    # automatically called up when reqAccountUpdates is activated. It ONLY receives
+    # a specific SINGLE account along with a subscription flag, unlike accountSummary
     def updateAccountValue(self, key:str, val:str, currency:str,
                             accountName:str):
         update_AccountValue = self.update_AccountValue
@@ -218,12 +200,8 @@ class ClientApp(wrapper.EWrapper, client.EClient):
         if key == 'NetLiquidationByCurrency' and currency == 'USD':
             self.account_value = val
             print('\nALERT: Net Liquidation Value', val)
-        if(self.debug):
-            print("UpdateAccountValue. Key:", key, "Value:", val,
-                  "Currency:", currency, "AccountName:", accountName)
-
+    
     ## PORTFOLIO ##
-    @iswrapper
     # automatically called up when reqAccountUpdates is activated
     def updatePortfolio(self, contract:Contract, position:float,
                         marketPrice:float, marketValue:float,
@@ -238,9 +216,18 @@ class ClientApp(wrapper.EWrapper, client.EClient):
                                  'real_PnL': realizedPNL, 'account_name': accountName
                                  })
     
-    ## POSITION ##
-    @iswrapper
-    # return all position in real-time of your account
+    def updateAccountTime(self, timeStamp: str):
+        self.update_AccountTime = timeStamp
+        print("\nUpdateAccountTime. Time:", timeStamp)
+        
+    # Called after updateAccountValue() and updatePortfolio() is sent
+    def accountDownloadEnd(self, accountName: str):
+        super().accountDownloadEnd(accountName)
+        print("\nAccount download finished:", accountName)
+        self.reqAccountUpdates(False, acctCode = acc_code)
+        
+    ################### POSITION ###################
+    # return all OPEN position in real-time of your account
     def position(self, account: str, contract: Contract, position: float,
                  avgCost: float):
         update_Position = self.update_Position
@@ -248,23 +235,15 @@ class ClientApp(wrapper.EWrapper, client.EClient):
                                 'SecType':contract.secType, 'Currency': contract.currency, 
                                 'Position': position, 'Avg Cost': avgCost
                                 })
-        if(self.debug):    
-            print("Position.", account, "Symbol:", contract.symbol, "SecType:",
-                  contract.secType, "Currency:", contract.currency,
-                  "Position:", position, "Avg cost:", avgCost)
     
-    @iswrapper
     # This is called once all position data for a given request are
     # received and functions as an end marker for the position() data
     def positionEnd(self):
-        if self.positionEnd_flag:
-            return
         super().positionEnd()
         self.positionEnd_flag = True
         print("\nPositionEnd")
     
-    ## ORDER ##
-    @iswrapper
+    ################### ORDER ###################
     # this event is called whenever the status of your order changes. This is
     # fired automatically when user has open order status
     def orderStatus(self, orderId: OrderId, status: str, filled: float,
@@ -272,36 +251,22 @@ class ClientApp(wrapper.EWrapper, client.EClient):
                     parentId: int, lastFillPrice: float, clientId: int,
                     whyHeld: str, mktCapPrice: float):
         order_Status = self.order_Status
-        order_Status = [{"OrderId": orderId, "Status": status, "Filled": filled,
+        order_Status.append({"OrderId": orderId, "Status": status, "Filled": filled,
                   "Remaining": remaining, "AvgFillPrice": avgFillPrice,
                   "PermId": permId, "ParentId": parentId, "LastFillPrice":lastFillPrice, 
-                  "ClientId": clientId, "WhyHeld":whyHeld, "MktCapPrice": mktCapPrice}]
-        if(self.debug):
-            print("OrderStatus. Id: ", orderId, ", Status: ", status, ", Filled: ", filled,
-                  ", Remaining: ", remaining, ", AvgFillPrice: ", avgFillPrice,
-                  ", PermId: ", permId, ", ParentId: ", parentId, ", LastFillPrice: ",
-                  lastFillPrice, ", ClientId: ", clientId, ", WhyHeld: ",
-                  whyHeld, ", MktCapPrice: ", mktCapPrice)
+                  "ClientId": clientId, "WhyHeld":whyHeld, "MktCapPrice": mktCapPrice})
         
-    @iswrapper
     # this function automatically called to feed in order status method
     def openOrder(self, orderId: OrderId, contract: Contract, order: Order,
                   orderState: OrderState):
         open_Order = self.open_Order
-        open_Order = [{"OrderID": orderId, "Cont_Symb":contract.symbol, 
+        open_Order.append({"OrderID": orderId, "Cont_Symb":contract.symbol, 
                        "secType":contract.secType, "EXCH": contract.exchange, 
                        "Ord_Act": order.action, "Ord_Type":order.orderType,
-                       "Ord_Qtty": order.totalQuantity, "Ord_State": orderState.status
-                       }]
-        if(self.debug):
-            print("OpenOrder. ID:", orderId, contract.symbol, contract.secType,
-                  "@", contract.exchange, ":", order.action, order.orderType,
-                  order.totalQuantity, orderState.status)
-
+                       "Ord_Qtty": order.totalQuantity, "Ord_State": orderState.status})
         order.contract = contract
         self.permId2ord[order.permId] = order
     
-    @iswrapper
     def openOrderEnd(self):
         if self.openOrderEnd_flag == False:
             return
@@ -310,12 +275,172 @@ class ClientApp(wrapper.EWrapper, client.EClient):
         print("OpenOrderEnd")
     
     ################### MARKET DATA ###################
+    # This returns 4 market data types (real-time, frozen, delayed, delayed-frozen)
+    # when TWS switches from real-time to frozen or from delayed to delayed-frozen
+    # refer to class above we will only use delayed version of market data type
+    def marketDataType(self, reqId: TickerId, marketDataType: int):
+        super().marketDataType(reqId, marketDataType)
+        print("MarketDataType. ", reqId, "Type:", marketDataType)
     
+    # Market data tick price callback. Handles all price related ticks. Every tickPrice
+    # callback is followed by tickSize callback. value of -1 or 0 indicates no data
+    # whereas positive tickPrice with positive tickSize indicates active quote
+    def tickPrice(self, reqId: TickerId, tickType: TickType, price: float,
+                  attrib: TickAttrib):
+        super().tickPrice(reqId, tickType, price, attrib)
+        tick_Price = self.tick_Price
+        tick_Price.append({"TickId": reqId, "tickType": tickType,
+              "Price": price, "CanAutoExecute:": attrib.canAutoExecute,
+              "PastLimit": attrib.pastLimit})
+        if tickType == TickTypeEnum.BID or tickType == TickTypeEnum.ASK:
+            print("PreOpen:", attrib.preOpen)
+        else:
+            print()
     
+    # Market data tick size callback. Handles all size-related ticks
+    def tickSize(self, reqId: TickerId, tickType: TickType, size: int):
+        super().tickSize(reqId, tickType, size)
+        tick_Size = self.tick_Size
+        tick_Size.append({"TickId:":reqId, "tickType":tickType, "Size": size})
+    
+    # market data callback
+    def tickGeneric(self, reqId: TickerId, tickType: TickType, value: float):
+        super().tickGeneric(reqId, tickType, value)
+        tick_Generic = self.tick_Generic
+        tick_Generic.append({"TickId": reqId, "tickType": tickType, "Value": value})
+        
+    # market data callback to wrap independent tickSize callbacks anytime the tickSize
+    # changes, and so there will be duplicate tickSize message following tickPrice
+    def tickString(self, reqId: TickerId, tickType: TickType, value: str):
+        super().tickString(reqId, tickType, value)
+        tick_String = self.tick_String
+        tick_String.append({"TickId": reqId, "Type": tickType, "Value": value})
+    
+    # callback for Exchange for Physicals, an off market trading mechanism that
+    # enables customers to swap futures and options exposure for an offsetting
+    # physical position.
+    def tickEFP(self, reqId:TickerId, tickType:TickType, basisPoints:float,
+                formattedBasisPoints:str, totalDividends:float,
+                holdDays:int, futureLastTradeDate:str, dividendImpact:float,
+                dividendsToLastTradeDate:float):
+        super().tickEFP(reqId, tickType, basisPoints, formattedBasisPoints, totalDividends,
+                        holdDays, futureLastTradeDate, dividendImpact, dividendsToLastTradeDate)
+        tick_EFP = self.tick_EFP
+        tick_EFP.append({"TickId": reqId, "Type": tickType, "basisPt": basisPoints,
+                         "formattedBP":formattedBasisPoints ,"totalDividents": totalDividends,
+                         "holdDays": holdDays, "futureLastTradeDate": futureLastTradeDate,
+                         "dividendImpact":dividendImpact, "dividendsToLastTradeDate": dividendsToLastTradeDate})    
+    
+    def tickSnapshotEnd(self, reqId: int):
+        super().tickSnapshotEnd(reqId)
+        self.tickSnapshotEnd_flag = True
+        print("\nTickSnapshotEnd:", reqId)
+        
+    ################### MARKET SCANNERS ###################
+    # Provide a quick scan of relevant markets and return the top financial
+    # instruments based on defined filtering criteria
+    def scannerParameters(self, xml: str):
+        super().scannerParameters(xml)
+        open('log/scanner.xml', 'w').write(xml)
+    
+    def scannerData(self, reqId: int, rank: int, contractDetails: ContractDetails,
+                    distance: str, benchmark: str, projection: str, legsStr: str):
+        super().scannerData(reqId, rank, contractDetails, distance, benchmark,
+                            projection, legsStr)
+        scanner_Data = self.scanner_Data
+        scanner_Data.append({"ReqId": reqId, "Rank": rank, "Symbol": contractDetails.summary.symbol,
+              "SecType": contractDetails.summary.secType, "Currency": contractDetails.summary.currency,
+              "Distance": distance, "Benchmark": benchmark,
+              "Projection": projection, "Legs String": legsStr})
+    
+    def scannerDataEnd(self, reqId: int):
+        super().scannerDataEnd(reqId)
+        self.ScannerDataEnd_flag = True
+        print("ScannerDataEnd. ", reqId)
+    
+    ################### MARKET DEPTH ###################
+    # Market Depth is a property of the orders that are contained in the limit
+    # order book at a given time OR in other words, the amount that will be
+    # traded for a limit order with a given price by given size. This request
+    # must be direct-routed to an exchange
+    def updateMktDepth(self, reqId: TickerId, position: int, operation: int,
+                       side: int, price: float, size: int):
+        super().updateMktDepth(reqId, position, operation, side, price, size)
+        update_MktDepth = self.update_MktDepth
+        update_MktDepth.append({"TickId": reqId, "Position": position, 
+                               "Operation": operation, "Side": side, "Price": price, 
+                               "Size": size})
+    
+    def updateMktDepthL2(self, reqId: TickerId, position: int, marketMaker: str,
+                         operation: int, side: int, price: float, size: int):
+        super().updateMktDepthL2(reqId, position, marketMaker, operation, side,
+                                 price, size)
+        update_MktDepthL2 = self.update_MktDepthL2
+        update_MktDepthL2.append({"TickId": reqId, "Position": position, 
+                                  "Operation":operation, "Side": side, "Price": price, 
+                                  "Size": size})
+    
+    ################### CONTRACT DETAIL ###################
+    # Full contract's definition
+    def contractDetails(self, reqId: int, contractDetails: ContractDetails):
+        super().contractDetails(reqId, contractDetails)
+        attrs = vars(contractDetails.summary)
+        print(', '.join("%s: %s" % item for item in attrs.items()))
+    
+    def contractDetailsEnd(self, reqId: int):
+        super().contractDetailsEnd(reqId)
+        self.contract_Details_flag = True
+        print("ContractDetailsEnd. ", reqId, "\n")
    
-################################## END CLASS ################################## 
+    ################### EXECUTION DETAIL ###################
+    def execDetails(self, reqId: int, contract: Contract, execution: Execution):
+        super().execDetails(reqId, contract, execution)
+        exec_Details = self.exec_Details
+        exec_Details.append({"reqId": reqId, "symbol":contract.symbol, "secType":contract.secType, 
+                             "curr":contract.currency, "execId":execution.execId, 
+                             "execOrderId":execution.orderId, "execShares":execution.shares, 
+                             "execLastLiquidity":execution.lastLiquidity})
+    
+    def execDetailsEnd(self, reqId: int):
+        super().execDetailsEnd(reqId)
+        self.ExecDetailsEnd_flag = True
+        print("ExecDetailsEnd. ", reqId)
+    
+    def commissionReport(self, commissionReport: CommissionReport):
+        super().commissionReport(commissionReport)
+        print("CommissionReport. ", commissionReport.execId, commissionReport.commission,
+              commissionReport.currency, commissionReport.realizedPNL)
+    
+    ################### FUNDAMENTAL / REALTIMEBAR / HISTORICAL ###################
+    def fundamentalData(self, reqId: TickerId, data: str):
+        super().fundamentalData(reqId, data)
+        self.fundamental_Data_data = data
+        print("FundamentalData. ", reqId, data)
+    
+    def realtimeBar(self, reqId:TickerId, time:int, open:float, high:float,
+                    low:float, close:float, volume:int, wap:float, count:int):
+        super().realtimeBar(reqId, time, open, high, low, close, volume, wap, count)
+        real_timeBar = self.real_timeBar
+        real_timeBar.append({"ReqId": reqId, "time": time, "open": open,
+              "high": high, "low": low, "close": close, "volume": volume,
+              "wap": wap, "count": count})
+    
+    def historicalData(self, reqId:int, bar: BarData):
+        super().historicalData(reqId, bar)
+        historical_Data = self.historical_Data
+        historical_Data.append({"ReqId": reqId, "Date": bar.date, "Open": bar.open,
+              "High": bar.high, "Low": bar.low, "Close": bar.close, "Volume": bar.volume,
+              "Count": bar.barCount, "WAP": bar.average})
+    
+    def historicalDataEnd(self, reqId: int, start: str, end: str):
+        super().historicalDataEnd(reqId, start, end)
+        self.historicalDataEnd_flag = True
+        print("HistoricalDataEnd ", reqId, "from", start, "to", end)
+    
+################################## END CLASS clientApp ################################## 
     
 
+    
         
          
     
